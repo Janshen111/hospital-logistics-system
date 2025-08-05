@@ -13,15 +13,15 @@ const config = {
 
 // 新管理员账号信息
 const adminData = {
-  account: 'admin_new',
-  username: '管理员',
-  password: 'Admin123456', // 明文密码
+  account: 'admin123',
+  username: 'admin',
+  password: 'admin123', // 明文密码
   position: '管理员',
   department_id: 1, // 假设1是管理部门的ID
   gender: '男',
   age: 30,
   phone: '13800138000',
-  email: 'admin_new@hospital.com',
+  email: 'admin@hospital.com',
   hire_date: '2023-01-01',
   status: 'approved' // 直接设置为已批准
 };

@@ -17,7 +17,7 @@ exports.getAllPersonnel = async (req, res) => {
   console.log('请求时间:', new Date().toISOString());
   console.log('请求参数:', req.query);
   try {
-    const { page = 1, limit = 10, account, department_id, status } = req.query;
+    const { page = 1, limit = 10, account, department_id, status, sortBy = 'created_at', order = 'desc' } = req.query;
     // 确保page和limit是整数
     const pageNum = parseInt(page, 10);
     const limitNum = parseInt(limit, 10);
@@ -40,16 +40,22 @@ exports.getAllPersonnel = async (req, res) => {
     }
 
     // 权限控制：普通用户只能查看已批准人员
-    if (!['管理员', '主任'].includes(req.user.position)) {
+    if (!['管理员', '主任', 1, '1', 2, '2'].includes(req.user.position)) {
       whereClauses.push('status = ?');
       queryParams.push('approved');
     }
 
+    // 验证排序字段和顺序
+    const validSortFields = ['id', 'created_at', 'username', 'age'];
+    const validOrders = ['asc', 'desc'];
+    const sortField = validSortFields.includes(sortBy) ? sortBy : 'created_at';
+    const sortOrder = validOrders.includes(order.toLowerCase()) ? order.toLowerCase() : 'desc';
+
     // 构建完整查询
     const whereClause = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
-    // 使用请求中的分页参数
+    // 使用请求中的分页参数和排序参数
     const [personnel] = await db.query(
-      `SELECT * FROM personnel ${whereClause} ORDER BY id ASC LIMIT ? OFFSET ?`,
+      `SELECT * FROM personnel ${whereClause} ORDER BY ${sortField} ${sortOrder} LIMIT ? OFFSET ?`,
       [...queryParams, limitNum, offset]
     );
 
@@ -93,7 +99,7 @@ exports.getPersonnelById = async (req, res) => {
 
     const personnel = rows[0];
     // 权限控制：非管理员只能查看已批准人员
-    if (!['管理员', '主任'].includes(req.user.position) && personnel.status !== 'approved') {
+    if (!['管理员', '主任', 1, '1', 2, '2'].includes(req.user.position) && personnel.status !== 'approved') {
       return res.status(403).json({
         success: false,
         message: '无权查看未批准人员信息'
@@ -117,7 +123,7 @@ exports.getPersonnelById = async (req, res) => {
 exports.createPersonnel = async (req, res) => {
   try {
     // 权限控制：管理员和主任可创建
-    if (!['管理员', '主任'].includes(req.user.position)) {
+    if (!['管理员', '主任', 1, '1', 2, '2'].includes(req.user.position)) {
       return res.status(403).json({
         success: false,
         message: '只有管理员和主任有权限创建人员'
@@ -127,7 +133,7 @@ exports.createPersonnel = async (req, res) => {
     const { username, account, gender, age, position, department_id, hire_date, phone, email, password, status = 'pending' } = req.body;
 
     // 职位权限控制：只有管理员可以创建管理员
-    if (position === '管理员' && req.user.position !== '管理员') {
+    if ((position === '管理员' || position === 1 || position === '1') && !['管理员', 1, '1'].includes(req.user.position)) {
       return res.status(403).json({
         success: false,
         message: '只有管理员可以创建管理员账户'
@@ -200,49 +206,82 @@ const [emailExists] = await db.query('SELECT id FROM personnel WHERE email = ?',
 // 更新人员信息
 exports.updatePersonnel = async (req, res) => {
   try {
+    console.log('接收到的更新数据:', req.body);
     const { id } = req.params;
     const updates = req.body;
-    const isAdmin = req.user.position === '管理员';
-    const isDirector = req.user.position === '主任';
+    const isAdmin = ['管理员', 1, '1'].includes(req.user.position);
+    const isDirector = ['主任', 2, '2'].includes(req.user.position);
+    const isHR = req.user.department === '人事科';
     const isSelf = parseInt(id) === parseInt(req.user.id);
 
-    // 职位变更权限控制
-    if (updates.position && updates.position === '管理员' && !isAdmin) {
-      return res.status(403).json({
-        success: false,
-        message: '只有管理员可以设置管理员职位'
-      });
+    // 获取目标用户信息
+    const [targetUserResult] = await db.query('SELECT position, department_id FROM personnel WHERE id = ?', [id]);
+    if (targetUserResult.length === 0) {
+      return res.status(404).json({ success: false, message: '未找到该人员' });
+    }
+    const targetUser = targetUserResult[0];
+    const isTargetHRDirector = targetUser.department === '人事科' && ['主任', 2, '2'].includes(targetUser.position);
+
+    // 职位修改权限控制
+    if (updates.position && updates.position !== targetUser.position) {
+      // 只有主任可以修改职位
+      if (!isDirector) {
+        return res.status(403).json({ success: false, message: '只有主任可以修改职位' });
+      }
+      // 主任不能修改自己的职位
+      if (isDirector && isSelf) {
+        return res.status(403).json({ success: false, message: '主任不能修改自己的职位' });
+      }
+      // 只有管理员可以设置管理员职位
+      if (['管理员', 1, '1'].includes(updates.position) && !isAdmin) {
+        return res.status(403).json({ success: false, message: '只有管理员可以设置管理员职位' });
+      }
+      // 如果更新管理员职位，强制状态为已批准
+      if (['管理员', 1, '1'].includes(updates.position)) {
+        updates.status = 'approved';
+      }
     }
 
-    // 如果更新管理员职位，强制状态为已批准
-    if (updates.position === '管理员') {
-      updates.status = 'approved';
+    // 部门修改权限控制
+    if (updates.department_id && updates.department_id !== targetUser.department_id) {
+      // 只有人事科和主任可以修改部门
+      if (!isHR && !isDirector) {
+        return res.status(403).json({ success: false, message: '只有人事科和主任可以分配部门' });
+      }
+      // 人事科主任的部门只能由管理员修改
+      if (isTargetHRDirector && !isAdmin) {
+        return res.status(403).json({ success: false, message: '人事科主任的部门只能由管理员修改' });
+      }
+      // 不能修改自己的部门
+      if (isSelf) {
+        return res.status(403).json({ success: false, message: '不能修改自己的部门' });
+      }
     }
 
-    // 权限控制
-    if (!isAdmin && !isDirector && !isSelf) {
-      return res.status(403).json({
-        success: false,
-        message: '没有权限修改此人员信息'
-      });
+    // 基本权限控制
+    if (!isAdmin && !isDirector && !isSelf && !isHR) {
+      return res.status(403).json({ success: false, message: '没有权限修改此人员信息' });
     }
 
     // 主任不能修改管理员信息
     if (isDirector) {
-      const [targetUser] = await db.query('SELECT position FROM personnel WHERE id = ?', [id]);
-      if (targetUser.length > 0 && targetUser[0].position === '管理员') {
-        return res.status(403).json({
-          success: false,
-          message: '主任不能修改管理员信息'
-        });
+      if (['管理员', 1, '1'].includes(targetUser.position)) {
+        return res.status(403).json({ success: false, message: '主任不能修改管理员信息' });
       }
     }
 
-    // 普通用户只能修改自己的基本信息
-    if (!isAdmin && !isDirector && isSelf) {
-      const allowedFields = ['username', 'phone', 'email', 'password'];
+    // 普通用户只能修改自己的公开信息
+    if (!isAdmin && !isDirector && !isHR && isSelf) {
+      // 允许修改的字段：电话、邮箱、账号、密码、用户名、性别、年龄
+      const allowedFields = ['username', 'phone', 'email', 'password', 'gender', 'age', 'account'];
+      // 禁止修改的敏感字段
+      const forbiddenFields = ['position', 'department_id', 'hire_date', 'status'];
+      
+      // 删除不允许修改的字段
       Object.keys(updates).forEach(key => {
-        if (!allowedFields.includes(key)) delete updates[key];
+        if (!allowedFields.includes(key) || forbiddenFields.includes(key)) {
+          delete updates[key];
+        }
       });
     }
 
@@ -283,10 +322,13 @@ exports.updatePersonnel = async (req, res) => {
     const setClause = fields.map(field => `${field} = ?`).join(', ');
     const values = [...Object.values(updates), id];
 
+    console.log('执行的更新SQL:', `UPDATE personnel SET ${setClause} WHERE id = ?`);
+    console.log('SQL参数:', values);
     const [result] = await db.query(
       `UPDATE personnel SET ${setClause} WHERE id = ?`,
       values
     );
+    console.log('更新结果:', result);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({
@@ -312,7 +354,7 @@ exports.updatePersonnel = async (req, res) => {
 exports.updatePersonnelStatus = async (req, res) => {
   try {
     // 权限控制：仅管理员和主任可修改状态
-    if (!['管理员', '主任'].includes(req.user.position)) {
+    if (!['管理员', '主任', 1, '1', 2, '2'].includes(req.user.position)) {
       return res.status(403).json({
         success: false,
         message: '没有权限修改人员状态'
@@ -537,7 +579,7 @@ exports.bulkImportPersonnel = async (req, res) => {
 exports.deletePersonnel = async (req, res) => {
   try {
     // 权限控制：管理员和主任可删除
-    if (!['管理员', '主任'].includes(req.user.position)) {
+    if (!['管理员', '主任', 1, '1', 2, '2'].includes(req.user.position)) {
       return res.status(403).json({
         success: false,
         message: '只有管理员和主任有权限删除人员'
@@ -554,6 +596,15 @@ exports.deletePersonnel = async (req, res) => {
           message: '主任不能删除管理员'
         });
       }
+    }
+
+    // 检查目标用户是否是管理员
+    const [targetUser] = await db.query('SELECT position FROM personnel WHERE id = ?', [id]);
+    if (targetUser.length > 0 && targetUser[0].position === '管理员') {
+      return res.status(403).json({
+        success: false,
+        message: '管理员账号禁止删除'
+      });
     }
 
     const [result] = await db.query('DELETE FROM personnel WHERE id = ?', [id]);
